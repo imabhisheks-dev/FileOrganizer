@@ -1,0 +1,31 @@
+# Build outputs
+bin/
+obj/
+
+# Publish output
+publish/
+
+# Visual Studio / VS Code
+.vscode/
+*.user
+*.suo
+.vs/
+
+# .NET
+*.dll
+*.exe
+*.pdb
+*.nupkg
+
+# Generated HTML reports and sidecar data files
+Report/
+*.entries.json
+*.records.json
+
+# User-specific appsettings overrides (keep appsettings.json, ignore local secrets)
+appsettings.Local.json
+appsettings.*.Local.json
+
+# Windows
+Thumbs.db
+Desktop.ini
