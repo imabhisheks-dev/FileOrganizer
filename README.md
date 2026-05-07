@@ -1,6 +1,6 @@
 # FileOrganizer
 
-A .NET 8 Windows Service that watches one or more source folders for files matching configurable patterns and automatically **moves**, **copies**, or **deletes** them based on per-rule settings. All activity and log output are rendered as self-refreshing HTML files you can open in any browser.
+A .NET 8 background application that watches one or more source folders for files matching configurable patterns and automatically **moves**, **copies**, or **deletes** them based on per-rule settings. All activity and log output are rendered as self-refreshing HTML files you can open in any browser.
 
 ---
 
@@ -14,17 +14,19 @@ A .NET 8 Windows Service that watches one or more source folders for files match
    - [FileRule settings](#filerule-settings)
    - [File age fields](#file-age-fields)
    - [Full example (appsettings.json)](#full-example-appsettingsjson)
-5. [Running Locally (Console Mode)](#running-locally-console-mode)
+5. [Ways to Run](#ways-to-run)
+   - [1. Console mode (dotnet run)](#1-console-mode-dotnet-run)
+   - [2. Task Scheduler (recommended)](#2-task-scheduler-recommended)
+   - [3. Windows Service](#3-windows-service)
 6. [Debugging in VS Code](#debugging-in-vs-code)
-7. [Installing as a Windows Service](#installing-as-a-windows-service)
-8. [Uninstalling the Windows Service](#uninstalling-the-windows-service)
-9. [HTML Reports](#html-reports)
+7. [HTML Reports](#html-reports)
    - [Activity Report](#activity-report)
    - [Log Viewer](#log-viewer)
    - [Persistence across restarts](#persistence-across-restarts)
-10. [Live Dashboard](#live-dashboard)
-11. [Logging](#logging)
-12. [Hot-Reload Configuration](#hot-reload-configuration)
+8. [Live Dashboard](#live-dashboard)
+9. [Logging](#logging)
+10. [Hot-Reload Configuration](#hot-reload-configuration)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -32,17 +34,18 @@ A .NET 8 Windows Service that watches one or more source folders for files match
 
 - **Multiple file rules** — define any number of rules, each with its own patterns, source folders, target folder, and operation.
 - **Move, Copy, or Delete** — configurable per rule.
-- **Multiple file patterns per rule** — e.g. `["*.dmp", "*.log"]`; patterns are union-matched and deduplicated.
+- **Multiple file patterns per rule** — e.g. `["*.dmp", "*.log"]`; patterns are union-matched and deduplicated. Strict extension matching avoids Windows 8.3 filename quirks.
 - **Sub-directory scanning** — optionally recurse into sub-folders.
 - **Duplicate handling** — Skip / Overwrite / Rename (timestamp-suffixed) per rule.
+- **Skip if same size** — avoid re-copying files that already exist at the destination with identical size.
 - **File age guards** — two independent per-rule age filters:
   - `MostRecentAgeDays` — only process files modified/created within the last N days.
   - `OlderThanDays` — only process files whose most-recent change is older than N days (useful for Delete rules).
 - **Prepend source folder name** — optionally prefix the destination file name with the last segment of the source folder path (e.g. `Partners-filename.dmp`).
 - **Activity Report** — self-refreshing HTML showing all operations within the retention window, colour-coded by status. Columns are drag-resizable. Persisted across restarts.
 - **Log Viewer** — self-refreshing HTML showing all log messages within the retention window, with per-level filter buttons. Persisted across restarts.
-- **Live Dashboard** — lightweight HTTP dashboard on `localhost:{DashboardPort}` showing service status, recent errors, and per-rule file listings.
-- **Hot-reload config** — edit `appsettings.json` while the service is running; all changes take effect on the next polling cycle.
+- **Live Dashboard** — lightweight HTTP dashboard on `localhost:{DashboardPort}` showing service status, recent errors, and per-target-folder file listings with clipboard copy.
+- **Hot-reload config** — edit `appsettings.json` while the app is running; all changes take effect on the next polling cycle.
 - **Windows Event Log** integration — log messages also written to the Windows Application event log.
 
 ---
@@ -57,6 +60,8 @@ FileOrganizer/
 ├── Worker.cs                           BackgroundService polling loop
 ├── appsettings.json                    Main configuration (hot-reload enabled)
 ├── appsettings.Development.json        Local overrides (console logging, Debug level)
+├── schedule-startup.bat                Publishes + registers Task Scheduler startup task
+├── remove-startup.bat                  Removes the Task Scheduler startup task
 ├── install-service.bat                 Publishes + registers + starts the Windows Service
 ├── uninstall-service.bat               Stops + removes the Windows Service
 ├── .vscode/
@@ -84,7 +89,7 @@ FileOrganizer/
 | Requirement | Version |
 |---|---|
 | .NET SDK | 8.0 or later |
-| Operating System | Windows (required for Windows Service host) |
+| Operating System | Windows |
 
 Install the .NET SDK from https://dotnet.microsoft.com/download.
 
@@ -98,14 +103,14 @@ All settings live under the `"FileOrganizer"` section in `appsettings.json`.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `PollingIntervalSeconds` | `int` | `60` | How often (seconds) the service scans all source folders. Minimum enforced: 5 s. |
+| `PollingIntervalSeconds` | `int` | `60` | How often (seconds) the service scans all source folders. |
 | `ReportFilePath` | `string` | `"FileOrganizer_Report.html"` | Full path of the HTML **activity report** file. Leave empty to disable. |
 | `LogFilePath` | `string` | `"FileOrganizer_Log.html"` | Full path of the HTML **log viewer** file. Leave empty to disable. |
 | `LogMaxEntries` | `int` | `200` | Maximum number of log entries kept in memory and the HTML log viewer. |
 | `LogRetentionDays` | `int` | `7` | Drop log entries older than this many days. `0` = keep forever. |
 | `ReportRetentionDays` | `int` | `7` | Drop activity report records older than this many days. `0` = keep forever. |
 | `HtmlRefreshSeconds` | `int` | `30` | Browser auto-refresh interval for both HTML files (seconds). |
-| `DashboardPort` | `int` | `5051` | Port the live Dashboard listens on (`localhost` only). Requires a service restart to change. |
+| `DashboardPort` | `int` | `5051` | Port the live Dashboard listens on (`localhost` only). Requires a restart to change. |
 
 ### FileRule settings
 
@@ -115,15 +120,16 @@ Each object in the `"Rules"` array supports:
 |---|---|---|---|
 | `Name` | `string` | `""` | Friendly name shown in logs and reports. |
 | `Enabled` | `bool` | `true` | Set to `false` to skip this rule without removing it. |
-| `FilePatterns` | `string[]` | `[]` | One or more glob patterns, e.g. `["*.dmp", "*.log"]`. Files matching any pattern are processed. |
+| `FilePatterns` | `string[]` | `[]` | One or more glob patterns, e.g. `["*.dmp", "*.log"]`, `["TFADO-*-logs.xlsx"]`. Files matching any pattern are processed. |
 | `SourceFolders` | `string[]` | `[]` | Folders to scan. UNC paths (`\\server\share\...`) are supported. |
 | `TargetFolder` | `string` | `""` | Destination folder (not required for `Delete`). Created automatically if absent. |
 | `Operation` | `"Copy"`, `"Move"`, or `"Delete"` | `"Copy"` | Action to perform on matched files. |
 | `IncludeSubDirectories` | `bool` | `false` | When `true`, sub-directories inside each `SourceFolder` are also scanned. |
 | `DuplicateHandling` | `"Skip"`, `"Overwrite"`, or `"Rename"` | `"Rename"` | What to do when a file with the same name already exists in the target. `Rename` appends a timestamp. Not applicable for `Delete`. |
-| `MostRecentAgeDays` | `double` | `0` | Only process files whose most-recent timestamp is **within** this many days. `0` = disabled. Fractional values supported (e.g. `0.5` = 12 h). Negative = error logged, file skipped. |
-| `OlderThanDays` | `double` | `0` | Only process files whose most-recent timestamp is **older than** this many days. `0` = disabled. Fractional values supported. Negative = error logged, file skipped. |
-| `PrependSourceFolderName` | `bool` | `false` | When `true`, the last path segment of the source folder is prepended to the destination file name with a `-` separator (e.g. `Partners-file.dmp`). |
+| `SkipIfSameSize` | `bool` | `false` | When `true`, skip copying/moving if the destination file already exists with the same byte size. |
+| `MostRecentAgeDays` | `double` | `0` | Only process files modified/created within this many days. `0` = disabled. Fractional values supported (e.g. `0.5` = 12 h). |
+| `OlderThanDays` | `double` | `0` | Only process files older than this many days. `0` = disabled. Useful for Delete rules. |
+| `PrependSourceFolderName` | `bool` | `false` | When `true`, the last path segment of the source folder is prepended to the destination file name (e.g. `Partners-file.dmp`). |
 
 ### File age fields
 
@@ -143,7 +149,7 @@ Files on disk (sorted by age, newest → oldest)
 
 - **`MostRecentAgeDays`** — use on Copy/Move rules to only pick up recently changed files.
 - **`OlderThanDays`** — use on Delete rules to only clean up files that haven't been touched in a while.
-- Both use `max(LastWriteTime, CreationTime)` so newly created but unmodified files are handled correctly.
+- Both use `max(LastWriteTime, CreationTime)`.
 - Set to `0` to disable the guard entirely.
 
 ### Full example (appsettings.json)
@@ -188,20 +194,22 @@ Files on disk (sorted by age, newest → oldest)
         "DuplicateHandling": "Overwrite",
         "MostRecentAgeDays": 1,
         "OlderThanDays": 0,
-        "PrependSourceFolderName": true
+        "PrependSourceFolderName": true,
+        "SkipIfSameSize": true
       },
       {
-        "Name": "ParallelStack",
+        "Name": "SyncReports",
         "Enabled": true,
-        "FilePatterns": [ "*.png" ],
-        "SourceFolders": [ "C:\\Organized\\DumpFiles" ],
-        "TargetFolder": "\\\\fileserver\\share\\ParallelStacks",
+        "FilePatterns": [ "TFADO-*-logs.xlsx" ],
+        "SourceFolders": [ "C:\\Users\\username\\Downloads" ],
+        "TargetFolder": "C:\\Users\\username\\Documents\\RCAs",
         "Operation": "Copy",
-        "IncludeSubDirectories": true,
+        "IncludeSubDirectories": false,
         "DuplicateHandling": "Overwrite",
         "MostRecentAgeDays": 0,
         "OlderThanDays": 0,
-        "PrependSourceFolderName": false
+        "PrependSourceFolderName": false,
+        "SkipIfSameSize": true
       },
       {
         "Name": "CleanupOldFiles",
@@ -214,7 +222,8 @@ Files on disk (sorted by age, newest → oldest)
         "DuplicateHandling": "Skip",
         "MostRecentAgeDays": 0,
         "OlderThanDays": 7,
-        "PrependSourceFolderName": false
+        "PrependSourceFolderName": false,
+        "SkipIfSameSize": false
       }
     ]
   }
@@ -223,21 +232,102 @@ Files on disk (sorted by age, newest → oldest)
 
 ---
 
-## Running Locally (Console Mode)
+## Ways to Run
+
+There are three ways to run FileOrganizer. Choose based on your needs:
+
+| | Method | Network shares (UNC) | Auto-start | Best for |
+|---|---|---|---|---|
+| **1** | `dotnet run` | ✅ | ❌ | Development / debugging |
+| **2** | Task Scheduler | ✅ | ✅ at login | **Recommended for everyday use** |
+| **3** | Windows Service | ❌ by default | ✅ at boot | Headless / server machines |
+
+---
+
+### 1. Console mode (dotnet run)
 
 ```powershell
-cd C:\as7.workspace\Repositories\FileOrganizer
-
-# Debug build (verbose logging via appsettings.Development.json)
+cd C:\path\to\FileOrganizer
 dotnet run
-
-# Release build
-dotnet run --configuration Release
 ```
 
-Press `Ctrl+C` to stop.
+Press `Ctrl+C` to stop. Live logs are printed to the terminal.
 
-> `DOTNET_ENVIRONMENT` defaults to `Development` when running via `dotnet run`, which activates `appsettings.Development.json` and enables `Debug`-level console logging.
+> `DOTNET_ENVIRONMENT` defaults to `Development` via `dotnet run`, which activates `appsettings.Development.json` and enables `Debug`-level console logging.
+
+---
+
+### 2. Task Scheduler (recommended)
+
+Runs silently in the background under your own Windows account — so UNC network shares work automatically with no credential setup.
+
+**Install (one-time):**
+
+```bat
+schedule-startup.bat
+```
+
+What the script does:
+1. Publishes a self-contained `win-x64` binary to the `publish\` subfolder.
+2. Creates a `run-hidden.vbs` launcher so no console window appears.
+3. Registers a Task Scheduler task that starts FileOrganizer automatically every time you log in.
+
+**Start immediately (without rebooting):**
+
+```powershell
+schtasks /Run /TN FileOrganizer
+```
+
+**Check if running:**
+
+```powershell
+tasklist /FI "IMAGENAME eq FileOrganizer.exe" /NH
+```
+
+**Stop:**
+
+```powershell
+taskkill /IM FileOrganizer.exe /F
+```
+
+**Remove (uninstall):**
+
+```bat
+remove-startup.bat
+```
+
+The active configuration file is:
+```
+<repo>\publish\appsettings.json
+```
+
+Edit that file to change rules or paths — hot-reload applies, no restart needed.
+
+---
+
+### 3. Windows Service
+
+Runs at system boot before any user logs in. By default it runs under `LocalSystem` which **cannot access UNC network paths**. If you need network access you must configure a domain service account via `services.msc` → **Log On** tab after installation.
+
+**Install (requires Administrator):**
+
+```bat
+install-service.bat
+```
+
+**Control:**
+
+```powershell
+Start-Service FileOrganizer
+Stop-Service  FileOrganizer
+Get-Service   FileOrganizer
+```
+
+**Uninstall (requires Administrator):**
+
+```bat
+uninstall-service.bat
+```
 
 ---
 
@@ -248,7 +338,7 @@ A `launch.json` and `tasks.json` are included in `.vscode/`.
 | Config | How |
 |---|---|
 | **Debug FileOrganizer** | Press **F5** — builds a Debug binary and launches with the debugger attached. `DOTNET_ENVIRONMENT=Development` is set automatically. |
-| **Attach to FileOrganizer** | Start the service in a terminal (`dotnet run`), then press **F5** and pick "Attach to FileOrganizer". |
+| **Attach to FileOrganizer** | Start the app in a terminal (`dotnet run`), then use **Attach to FileOrganizer**. |
 
 Useful breakpoints:
 - `FileProcessorService.cs` → `ProcessFileAsync()` — see why each file is skipped or processed.
@@ -258,50 +348,6 @@ To get verbose log output without a debugger, set in `appsettings.json`:
 ```json
 "LogLevel": { "Default": "Debug" }
 ```
-
----
-
-## Installing as a Windows Service
-
-Run **as Administrator** from the repository root:
-
-```bat
-install-service.bat
-```
-
-What the script does:
-
-1. Publishes a self-contained `win-x64` binary to the `publish\` subfolder.
-2. Registers the service with `sc create` (auto-start).
-3. Sets a failure recovery policy (restart after 5 s → 10 s → 30 s).
-4. Starts the service immediately.
-
-The active configuration file after installation is:
-```
-<repo>\publish\appsettings.json
-```
-
-Edit that file to change rules or paths — hot-reload applies, no restart needed.
-
-**Verify / control the service:**
-
-```powershell
-Get-Service   FileOrganizer
-Start-Service FileOrganizer
-Stop-Service  FileOrganizer
-```
-
----
-
-## Uninstalling the Windows Service
-
-Run **as Administrator**:
-
-```bat
-uninstall-service.bat
-```
-
-Stops and removes the service registration. The `publish\` folder and config files are left on disk.
 
 ---
 
@@ -326,7 +372,7 @@ Shows all file operations within the last `ReportRetentionDays` days, newest fir
 | Status | `In Progress` / `Success` / `Failed` — hover Failed pill for the error message |
 
 Row colours: green = Success, red = Failed, amber = In Progress.  
-Columns are **auto-sized to content** and can be **drag-resized** by grabbing the right edge of any header.
+Columns can be **drag-resized** by grabbing the right edge of any header.
 
 ### Log Viewer
 
@@ -345,7 +391,7 @@ Shows all service log messages within the last `LogRetentionDays` days, capped a
 
 ### Persistence across restarts
 
-Both the activity report and log viewer survive service restarts. On shutdown, records are persisted to JSON sidecar files next to the HTML outputs:
+Both the activity report and log viewer survive restarts. Records are persisted to JSON sidecar files next to the HTML outputs:
 
 | Sidecar file | Contents |
 |---|---|
@@ -358,13 +404,17 @@ On startup these are loaded back automatically. Old entries outside the retentio
 
 ## Live Dashboard
 
-Open `http://localhost:{DashboardPort}/` (default: http://localhost:5051/) in a browser while the service is running.
+Open `http://localhost:{DashboardPort}/` (default: http://localhost:5051/) in a browser while the app is running.
 
-- Service status pill (Running / Error)
-- Recent error count (last 5 minutes)
-- Per-rule file tables with sortable columns and live filter input
-- Auto-polls every 5 seconds
-- JSON API at `http://localhost:5051/api/status`
+- **Status pills** — Service Running / Offline, and recent error count (last 5 min)
+- **Summary cards** — total files, number of folders, error count, poll interval
+- **Per-folder tables** — one card per target folder, displayed side by side
+  - Columns: Last Modified, Copy Path, File Name, Size
+  - Click **⎘** on any row to copy the full file path to clipboard
+  - Tables are scrollable (max ~12 rows before scrollbar appears)
+  - Column headers are sortable
+- **Auto-polls every 5 seconds**
+- **JSON API** at `http://localhost:5051/api/status`
 
 ---
 
@@ -389,334 +439,99 @@ Set `"Default": "Debug"` under `Logging:LogLevel` for verbose output.
 
 - Adding, removing, or toggling rules (`Enabled`)
 - `PollingIntervalSeconds`
-- Any rule field: `FilePatterns`, `SourceFolders`, `TargetFolder`, `Operation`, `DuplicateHandling`, `IncludeSubDirectories`, `MostRecentAgeDays`, `OlderThanDays`, `PrependSourceFolderName`
+- Any rule field: `FilePatterns`, `SourceFolders`, `TargetFolder`, `Operation`, `DuplicateHandling`, `IncludeSubDirectories`, `MostRecentAgeDays`, `OlderThanDays`, `PrependSourceFolderName`, `SkipIfSameSize`
 - `ReportFilePath`, `LogFilePath`, `LogMaxEntries`, `LogRetentionDays`, `ReportRetentionDays`, `HtmlRefreshSeconds`
 
-> **Note:** `DashboardPort` requires a service restart to take effect.  
-> When running as a Windows Service the active config is `publish\appsettings.json`, not the source repo copy.
-
-
----
-
-## Table of Contents
-
-1. [Features](#features)
-2. [Project Structure](#project-structure)
-3. [Prerequisites](#prerequisites)
-4. [Configuration Reference](#configuration-reference)
-   - [Top-level settings](#top-level-settings)
-   - [FileRule settings](#filerule-settings)
-   - [File age window](#file-age-window)
-   - [Full example (appsettings.json)](#full-example-appsettingsjson)
-5. [Running Locally (Console Mode)](#running-locally-console-mode)
-6. [Installing as a Windows Service](#installing-as-a-windows-service)
-7. [Uninstalling the Windows Service](#uninstalling-the-windows-service)
-8. [HTML Reports](#html-reports)
-   - [Activity Report](#activity-report)
-   - [Log Viewer](#log-viewer)
-9. [Logging](#logging)
-10. [Hot-Reload Configuration](#hot-reload-configuration)
+> **Note:** `DashboardPort` requires a restart to take effect.  
+> When using Task Scheduler or Windows Service, the active config is `publish\appsettings.json`, not the source repo copy.
 
 ---
 
-## Features
+## Troubleshooting
 
-- **Multiple file rules** — define any number of rules, each with its own file pattern, source folders, target folder, and operation.
-- **Move or Copy** — configurable per rule.
-- **Sub-directory scanning** — optionally recurse into sub-folders.
-- **Duplicate handling** — Skip / Overwrite / Rename (timestamp-suffixed) per rule.
-- **File age window** — two complementary guards per rule:
-  - `MinFileAgeMinutes` — skip files that may still be open/writing.
-  - `MaxFileAgeMinutes` — only process recently created or modified files.
-- **Activity Report** — a self-refreshing HTML file showing the last 25 file operations with colour-coded status (Success / Failed / In Progress). Columns auto-size to content and are drag-resizable.
-- **Log Viewer** — a self-refreshing HTML file showing all service log messages from the last configurable number of hours, with per-level filter buttons.
-- **Hot-reload config** — edit `appsettings.json` while the service is running; all rule and path changes take effect on the next polling cycle with no restart required.
-- **Windows Event Log** integration — log messages also written to the Windows Application event log (source: `FileOrganizer`).
+### UNC network paths not accessible when running as Windows Service
 
----
+**Symptom:** Files on `\\server\share\...` are not found or access is denied, but the same paths work fine with `dotnet run`.
 
-## Project Structure
+**Cause:** Windows Services run under `LocalSystem` by default, which has no domain credentials and cannot access network shares.
 
-```
-FileOrganizer/
-├── FileOrganizer.csproj
-├── Program.cs                          Entry point; builds and runs the host
-├── Worker.cs                           BackgroundService polling loop
-├── appsettings.json                    Main configuration (hot-reload enabled)
-├── appsettings.Development.json        Local overrides (console logging, Debug level)
-├── install-service.bat                 Publishes + registers + starts the Windows Service
-├── uninstall-service.bat               Stops + removes the Windows Service
-├── Models/
-│   ├── FileOrganizerConfig.cs          Top-level config shape
-│   ├── FileRule.cs                     Rule shape + FileOperation / DuplicateHandling enums
-│   └── FileActivityRecord.cs          Activity record shape + ActivityStatus enum
-├── Services/
-│   ├── FileProcessorService.cs         Core scan / move / copy logic
-│   └── ActivityReportService.cs        Thread-safe ring-buffer + HTML activity report writer
-└── Logging/
-    ├── HtmlLogEntry.cs                 Log entry shape
-    ├── HtmlLogBuffer.cs                Thread-safe ring-buffer + HTML log viewer writer
-    ├── HtmlLogger.cs                   ILogger implementation
-    └── HtmlLoggerProvider.cs           ILoggerProvider — one logger per category
-```
+**Fix:** Use **Task Scheduler** (recommended) instead — it runs under your own login and has full network access automatically. If you must use the Windows Service, change the service account in `services.msc` → **File Organizer Service** → Properties → **Log On** tab → **This account** → enter your domain credentials (`DOMAIN\username`).
 
----
-
-## Prerequisites
-
-| Requirement | Version |
-|---|---|
-| .NET SDK | 8.0 or later |
-| Operating System | Windows (required for Windows Service host) |
-
-Install the .NET SDK from https://dotnet.microsoft.com/download.
-
----
-
-## Configuration Reference
-
-All settings live under the `"FileOrganizer"` section in `appsettings.json`.
-
-### Top-level settings
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `PollingIntervalSeconds` | `int` | `60` | How often (in seconds) the service scans all source folders. Minimum enforced: 5 s. |
-| `ReportFilePath` | `string` | `"FileOrganizer_Report.html"` | Full path of the HTML **activity report** file. Leave empty to disable. |
-| `LogFilePath` | `string` | `"FileOrganizer_Log.html"` | Full path of the HTML **log viewer** file. Leave empty to disable. |
-| `LogMaxEntries` | `int` | `200` | Maximum number of log entries kept in the HTML log viewer. Oldest entries are evicted first when this limit is reached. |
-| `LogRetentionHours` | `int` | `24` | Log entries older than this many hours are dropped from the HTML log viewer on every write. Set to `0` to disable time-based eviction. |
-
-### FileRule settings
-
-Each object in the `"Rules"` array supports:
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `Name` | `string` | `""` | Friendly name shown in logs and the activity report. |
-| `Enabled` | `bool` | `true` | Set to `false` to skip this rule without deleting it. |
-| `FilePattern` | `string` | `"*.*"` | Glob pattern matched against file names, e.g. `"*.dmp"`, `"report_*.csv"`. |
-| `SourceFolders` | `string[]` | `[]` | List of folders to scan. UNC paths (`\\server\share\...`) are supported. |
-| `TargetFolder` | `string` | `""` | Destination folder. Created automatically if it does not exist. UNC paths supported. |
-| `Operation` | `"Move"` or `"Copy"` | `"Copy"` | Whether to move or copy matched files. |
-| `IncludeSubDirectories` | `bool` | `false` | When `true`, sub-directories inside each `SourceFolder` are also scanned. |
-| `DuplicateHandling` | `"Skip"`, `"Overwrite"`, or `"Rename"` | `"Rename"` | What to do when a file with the same name already exists in the target folder. `Rename` appends a timestamp to the file name. |
-| `MinFileAgeMinutes` | `int` | `0` | Skip files whose last-write time is **less than** N minutes ago. Guards against picking up files still being written. `0` = disabled. |
-| `MaxFileAgeMinutes` | `int` | `0` | Skip files whose most-recent timestamp (creation or last-write, whichever is newer) is **older than** N minutes. Use this to limit processing to recently changed files only. `0` = disabled. |
-
-### File age window
-
-The two age settings work together to define a processing window. Example with `MinFileAgeMinutes: 3` and `MaxFileAgeMinutes: 5`:
-
-```
-NOW <--------------------------------------------------------------
-     0 min   1 min   2 min   3 min   4 min   5 min   6 min
-     [too fresh -- may still    [ PROCESS ]    [too old --
-      be open/writing]                          ignored]
-```
-
-For `MaxFileAgeMinutes`, the service takes whichever is more recent of `LastWriteTime` and `CreationTime`, so a newly created but unmodified file is still caught correctly.
-
-Set either value to `0` to disable that bound.
-
-### Full example (appsettings.json)
-
-```json
-{
-  "Logging": {
-    "LogLevel": {
-      "Default": "Information",
-      "Microsoft.Hosting.Lifetime": "Information"
-    },
-    "EventLog": {
-      "SourceName": "FileOrganizer",
-      "LogName": "Application",
-      "LogLevel": {
-        "Default": "Information"
-      }
-    }
-  },
-
-  "FileOrganizer": {
-    "PollingIntervalSeconds": 60,
-    "ReportFilePath": "C:\\Repositories\\FileOrganizer\\FileOrganizerReport.html",
-    "LogFilePath": "C:\\Repositories\\FileOrganizer\\FileOrganizerLog.html",
-    "LogMaxEntries": 200,
-    "LogRetentionHours": 24,
-
-    "Rules": [
-      {
-        "Name": "DumpFiles",
-        "Enabled": true,
-        "FilePattern": "*.dmp",
-        "SourceFolders": [
-          "\\\\fileserver\\share\\Dumps\\AGI",
-          "\\\\fileserver\\share\\Dumps\\APG",
-          "\\\\fileserver\\share\\Dumps\\ISG",
-          "\\\\fileserver\\share\\Dumps\\Partners"
-        ],
-        "TargetFolder": "C:\\Organized\\DumpFiles",
-        "Operation": "Copy",
-        "IncludeSubDirectories": false,
-        "DuplicateHandling": "Overwrite",
-        "MinFileAgeMinutes": 3,
-        "MaxFileAgeMinutes": 5
-      },
-      {
-        "Name": "ParallelStack",
-        "Enabled": false,
-        "FilePattern": "*.png",
-        "SourceFolders": [
-          "C:\\Organized\\DumpFiles"
-        ],
-        "TargetFolder": "\\\\fileserver\\share\\ParallelStacks",
-        "Operation": "Move",
-        "IncludeSubDirectories": true,
-        "DuplicateHandling": "Overwrite",
-        "MinFileAgeMinutes": 3,
-        "MaxFileAgeMinutes": 0
-      }
-    ]
-  }
-}
-```
-
----
-
-## Running Locally (Console Mode)
-
-Use this during development — the service runs in the terminal window and writes coloured console output.
-
+To find your exact domain username, run:
 ```powershell
-cd C:\as7.workspace\Repositories\FileOrganizer
-
-# Debug build (verbose logging via appsettings.Development.json)
-dotnet run
-
-# Release build
-dotnet run --configuration Release
-```
-
-Press `Ctrl+C` to stop.
-
-> The `DOTNET_ENVIRONMENT` variable defaults to `Development` when running via `dotnet run`, which activates `appsettings.Development.json` and enables `Debug`-level console logging.
-
----
-
-## Installing as a Windows Service
-
-Run **as Administrator** from the repository root:
-
-```bat
-install-service.bat
-```
-
-What the script does:
-
-1. Publishes a self-contained `win-x64` binary to the `publish\` subfolder.
-2. Registers the service with `sc create` (auto-start).
-3. Sets a failure recovery policy (restart after 5 s → 10 s → 30 s).
-4. Starts the service immediately.
-
-After installation the active configuration file is:
-
-```
-<repo>\publish\appsettings.json
-```
-
-Edit that file to change rules or paths — no restart required (hot-reload).
-
-**Verify the service is running:**
-
-```powershell
-Get-Service FileOrganizer
-```
-
-**Start / stop manually:**
-
-```powershell
-Start-Service FileOrganizer
-Stop-Service  FileOrganizer
+whoami
 ```
 
 ---
 
-## Uninstalling the Windows Service
+### Task Scheduler launches a console window
 
-Run **as Administrator**:
+**Symptom:** Running `schtasks /Run /TN FileOrganizer` or logging in opens a visible console window.
 
-```bat
-uninstall-service.bat
-```
+**Cause:** The task is configured to run `FileOrganizer.exe` directly. Console apps always show a window unless launched via `wscript.exe`.
 
-This stops and removes the service registration. The `publish\` folder and `appsettings.json` are left on disk.
+**Fix:** Edit the task in Task Scheduler UI (`taskschd.msc`) → **FileOrganizer** → Properties → **Actions** tab → Edit:
 
----
-
-## HTML Reports
-
-Both HTML files are written to the paths configured in `appsettings.json`. Open them in any browser — they auto-refresh automatically.
-
-### Activity Report
-
-**Key:** `ReportFilePath`
-**Auto-refresh:** every 30 seconds
-
-Displays the **last 25 file operations** in descending time order.
-
-| Column | Description |
+| Field | Value |
 |---|---|
-| Time | Timestamp of the operation |
-| File Name | Name of the processed file (hover for full path) |
-| Source Folder | Folder the file was taken from |
-| Target Folder | Destination folder |
-| Op | `Move` or `Copy` |
-| Status | `In Progress` / `Success` / `Failed` (hover a Failed row's pill to see the error message) |
+| Program/script | `wscript.exe` |
+| Add arguments | `"C:\as7.workspace\Repositories\FileOrganizer\publish\run-hidden.vbs"` |
+| Start in | `C:\as7.workspace\Repositories\FileOrganizer\publish` |
 
-Row colours: green = Success, red = Failed, amber = In Progress.
-
-Columns are **auto-sized to content** on load and can be **drag-resized** by grabbing the right edge of any column header.
-
-### Log Viewer
-
-**Key:** `LogFilePath`
-**Auto-refresh:** every 10 seconds
-
-Displays all service log messages from the last `LogRetentionHours` hours (default: 24), capped to `LogMaxEntries` entries (default: 200), newest first.
-
-| Column | Description |
-|---|---|
-| Timestamp | `yyyy-MM-dd HH:mm:ss.fff` |
-| Level | TRACE / DEBUG / INFO / WARN / ERROR / CRIT |
-| Source | Shortened class name (hover for full namespace) |
-| Message | Log message; failed operations include a collapsible exception block with full stack trace |
-
-**Filter buttons** at the top let you toggle individual log levels. Clicking ALL resets to show everything.
+The `run-hidden.vbs` file is included in the `publish\` folder and launches the exe with window style 0 (invisible).
 
 ---
 
-## Logging
+### `schtasks /Create` or `schtasks /Delete` returns "Access is denied"
 
-Log messages are written to three sinks simultaneously:
+**Symptom:** Running `schedule-startup.bat` or any `schtasks` command fails with `ERROR: Access is denied`.
 
-| Sink | When active | Notes |
-|---|---|---|
-| Console | `dotnet run` (Development) | Coloured output; configured in `appsettings.Development.json` |
-| Windows Event Log | When running as a Windows Service | Application log, Source: `FileOrganizer` — view in **Event Viewer** |
-| HTML Log Viewer | Always (when `LogFilePath` is set) | Browser-friendly; auto-refreshes every 10 s |
+**Cause:** Group Policy on your machine restricts task creation via the command line.
 
-Default log level for all sinks: **Information**.
-Set `"Default": "Debug"` under `Logging:LogLevel` in `appsettings.json` for verbose output.
+**Fix:** Use the **Task Scheduler UI** (`taskschd.msc`) directly to create or edit the task. The `run-hidden.vbs` approach above works fine from the UI even when the command line is blocked.
 
 ---
 
-## Hot-Reload Configuration
+### App exits immediately when started via Task Scheduler
 
-`appsettings.json` is loaded with `reloadOnChange: true`. The following settings take effect **on the next polling cycle** without restarting the service or the process:
+**Symptom:** `schtasks /Run /TN FileOrganizer` reports success but the process disappears within seconds.
 
-- Adding, removing, or disabling rules
-- Changing `PollingIntervalSeconds`
-- Changing any rule field: `FilePattern`, `SourceFolders`, `TargetFolder`, `Operation`, `DuplicateHandling`, `IncludeSubDirectories`, `MinFileAgeMinutes`, `MaxFileAgeMinutes`
-- Changing `ReportFilePath`, `LogFilePath`, `LogMaxEntries`, `LogRetentionHours`
+**Cause:** `UseWindowsService()` in .NET makes the host wait for a signal from the Windows Service Control Manager. When launched any other way, it exits immediately.
 
-> **Note:** When running as a Windows Service the active config file is `publish\appsettings.json`, not the one in the source repository.
+**Fix:** Already resolved in this codebase — `UseConsoleLifetime()` is registered alongside `UseWindowsService()` so the app stays running when started outside of the SCM. If you see this after a fresh clone, ensure `Program.cs` contains both:
+```csharp
+.UseWindowsService(options => options.ServiceName = "FileOrganizer")
+.UseConsoleLifetime(options => options.SuppressStatusMessages = true)
+```
+
+---
+
+### Wrong domain in service account
+
+**Symptom:** `services.msc` or `sc create` rejects credentials with "The account name is invalid or does not exist".
+
+**Fix:** Run `whoami` in a terminal to get your exact domain and username, then use that value exactly (e.g. `infocorp\abhishek.singh7`, not `THINKFOLIO\...`). The domain shown in `whoami` is authoritative.
+
+---
+
+### Dashboard shows "Service Offline"
+
+**Symptom:** `http://localhost:5051/` shows the service as offline.
+
+**Checks:**
+1. Verify the process is running: `tasklist /FI "IMAGENAME eq FileOrganizer.exe" /NH`
+2. Confirm the port matches `appsettings.json` → `DashboardPort`
+3. Check the HTML log viewer for startup errors
+4. If the process is not running, start it: `schtasks /Run /TN FileOrganizer`
+
+---
+
+### Publish fails because the exe is locked
+
+**Symptom:** `dotnet publish` fails with "The file is locked by: FileOrganizer".
+
+**Fix:** Stop the running instance before publishing:
+```powershell
+taskkill /IM FileOrganizer.exe /F
+```
+Then re-run `schedule-startup.bat` or `dotnet publish` manually.

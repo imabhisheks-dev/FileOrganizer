@@ -7,10 +7,8 @@ using FileOrganizer.Services;
 HtmlLogBuffer? htmlLogBuffer = null;
 
 IHost host = Host.CreateDefaultBuilder(args)
-    .UseWindowsService(options =>
-    {
-        options.ServiceName = "FileOrganizer";
-    })
+    .UseWindowsService(options => options.ServiceName = "FileOrganizer")
+    .UseConsoleLifetime(options => options.SuppressStatusMessages = true)
     .ConfigureAppConfiguration((context, config) =>
     {
         // Support hot-reload of appsettings.json while service is running
