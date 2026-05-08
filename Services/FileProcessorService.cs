@@ -1,5 +1,8 @@
 using FileOrganizer.Models;
 using Microsoft.Extensions.Options;
+using Microsoft.Win32;
+using Windows.Data.Xml.Dom;
+using Windows.UI.Notifications;
 
 namespace FileOrganizer.Services;
 
@@ -239,6 +242,9 @@ public class FileProcessorService
                 await Task.Run(() => File.Delete(sourceFilePath));
                 _logger.LogInformation("[{rule}] Deleted: '{src}'", rule.Name, sourceFilePath);
                 _report.UpdateRecord(deleteRecord, ActivityStatus.Success);
+
+                if (rule.NotifyOnAction)
+                    ShowToastNotification($"[{rule.Name}] File Deleted", Path.GetFileName(sourceFilePath));
             }
             catch (Exception ex)
             {
@@ -330,6 +336,9 @@ public class FileProcessorService
             }
 
             _report.UpdateRecord(activityRecord, ActivityStatus.Success);
+
+            if (rule.NotifyOnAction)
+                ShowToastNotification($"[{rule.Name}] File {rule.Operation}d", fileName);
         }
         catch (Exception ex)
         {
@@ -368,5 +377,33 @@ public class FileProcessorService
         var clean   = string.Concat(folderSegment.Where(c => !invalid.Contains(c)));
 
         return string.IsNullOrEmpty(clean) ? rawFileName : $"{clean}-{rawFileName}";
+    }
+
+    // -------------------------------------------------------------------------
+    private static void ShowToastNotification(string title, string message)
+    {
+        try
+        {
+            const string appId = "FileOrganizer.Service";
+            using (var key = Registry.CurrentUser.CreateSubKey(@"SOFTWARE\Classes\AppUserModelId\" + appId))
+                key?.SetValue("DisplayName", "FileOrganizer");
+
+            var xml = $"""
+                <toast>
+                  <visual>
+                    <binding template="ToastGeneric">
+                      <text>{System.Security.SecurityElement.Escape(title)}</text>
+                      <text>{System.Security.SecurityElement.Escape(message)}</text>
+                    </binding>
+                  </visual>
+                </toast>
+                """;
+            var doc = new XmlDocument();
+            doc.LoadXml(xml);
+            ToastNotificationManager
+                .CreateToastNotifier(appId)
+                .Show(new ToastNotification(doc));
+        }
+        catch { /* best-effort: won't work in Session 0 or on pre-Win10 */ }
     }
 }

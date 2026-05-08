@@ -1,6 +1,6 @@
 # FileOrganizer
 
-A .NET 8 background application that watches one or more source folders for files matching configurable patterns and automatically **moves**, **copies**, or **deletes** them based on per-rule settings. All activity and log output are rendered as self-refreshing HTML files you can open in any browser.
+A .NET 8 background application that watches one or more source folders for files matching configurable patterns and automatically **moves**, **copies**, or **deletes** them based on per-rule settings. All activity and log output are rendered as self-refreshing HTML files you can open in any browser, and a live dashboard is available at `http://localhost:5051/`.
 
 ---
 
@@ -44,7 +44,8 @@ A .NET 8 background application that watches one or more source folders for file
 - **Prepend source folder name** — optionally prefix the destination file name with the last segment of the source folder path (e.g. `Partners-filename.dmp`).
 - **Activity Report** — self-refreshing HTML showing all operations within the retention window, colour-coded by status. Columns are drag-resizable. Persisted across restarts.
 - **Log Viewer** — self-refreshing HTML showing all log messages within the retention window, with per-level filter buttons. Persisted across restarts.
-- **Live Dashboard** — lightweight HTTP dashboard on `localhost:{DashboardPort}` showing service status, recent errors, and per-target-folder file listings with clipboard copy.
+- **Live Dashboard** — lightweight HTTP dashboard on `localhost:{DashboardPort}` showing service status, recent errors, per-target-folder file listings with clipboard copy, and **quick-open links** for the Activity Report and Log Viewer.
+- **Windows toast notifications** — optional per-rule Windows desktop notification after each successful Copy, Move, or Delete (Task Scheduler mode only).
 - **Hot-reload config** — edit `appsettings.json` while the app is running; all changes take effect on the next polling cycle.
 - **Windows Event Log** integration — log messages also written to the Windows Application event log.
 
@@ -89,7 +90,7 @@ FileOrganizer/
 | Requirement | Version |
 |---|---|
 | .NET SDK | 8.0 or later |
-| Operating System | Windows |
+| Operating System | Windows 10 (version 1809 / build 17763) or later |
 
 Install the .NET SDK from https://dotnet.microsoft.com/download.
 
@@ -130,6 +131,7 @@ Each object in the `"Rules"` array supports:
 | `MostRecentAgeDays` | `double` | `0` | Only process files modified/created within this many days. `0` = disabled. Fractional values supported (e.g. `0.5` = 12 h). |
 | `OlderThanDays` | `double` | `0` | Only process files older than this many days. `0` = disabled. Useful for Delete rules. |
 | `PrependSourceFolderName` | `bool` | `false` | When `true`, the last path segment of the source folder is prepended to the destination file name (e.g. `Partners-file.dmp`). |
+| `NotifyOnAction` | `bool` | `false` | When `true`, a Windows toast notification is shown after each successful operation for this rule. Works in Task Scheduler mode (runs as your user). Has no effect when running as a Windows Service in Session 0. |
 
 ### File age fields
 
@@ -195,7 +197,8 @@ Files on disk (sorted by age, newest → oldest)
         "MostRecentAgeDays": 1,
         "OlderThanDays": 0,
         "PrependSourceFolderName": true,
-        "SkipIfSameSize": true
+        "SkipIfSameSize": true,
+        "NotifyOnAction": true
       },
       {
         "Name": "SyncReports",
@@ -209,7 +212,8 @@ Files on disk (sorted by age, newest → oldest)
         "MostRecentAgeDays": 0,
         "OlderThanDays": 0,
         "PrependSourceFolderName": false,
-        "SkipIfSameSize": true
+        "SkipIfSameSize": true,
+        "NotifyOnAction": false
       },
       {
         "Name": "CleanupOldFiles",
@@ -223,7 +227,8 @@ Files on disk (sorted by age, newest → oldest)
         "MostRecentAgeDays": 0,
         "OlderThanDays": 7,
         "PrependSourceFolderName": false,
-        "SkipIfSameSize": false
+        "SkipIfSameSize": false,
+        "NotifyOnAction": false
       }
     ]
   }
@@ -268,9 +273,11 @@ schedule-startup.bat
 ```
 
 What the script does:
-1. Publishes a self-contained `win-x64` binary to the `publish\` subfolder.
-2. Creates a `run-hidden.vbs` launcher so no console window appears.
-3. Registers a Task Scheduler task that starts FileOrganizer automatically every time you log in.
+1. **Stops any running instance** (`schtasks /End` + `taskkill`) and waits 2 seconds for file handles to release.
+2. Publishes a self-contained `win-x64` binary to the `publish\` subfolder.
+3. Creates a `run-hidden.vbs` launcher so no console window appears.
+4. Registers a Task Scheduler task that starts FileOrganizer automatically every time you log in.
+5. **Starts the app immediately** via `schtasks /Run` — no relogin required.
 
 **Start immediately (without rebooting):**
 
@@ -314,6 +321,11 @@ Runs at system boot before any user logs in. By default it runs under `LocalSyst
 ```bat
 install-service.bat
 ```
+
+What the script does:
+1. **Stops any running instance** (`sc stop` + `taskkill`) and waits 2 seconds for file handles to release.
+2. Publishes a self-contained `win-x64` binary to the `publish\` subfolder.
+3. Registers and starts the Windows Service.
 
 **Control:**
 
@@ -408,6 +420,7 @@ Open `http://localhost:{DashboardPort}/` (default: http://localhost:5051/) in a 
 
 - **Status pills** — Service Running / Offline, and recent error count (last 5 min)
 - **Summary cards** — total files, number of folders, error count, poll interval
+- **Reports card** — quick-open buttons for the Activity Report and Log Viewer (opens in a new browser tab)
 - **Per-folder tables** — one card per target folder, displayed side by side
   - Columns: Last Modified, Copy Path, File Name, Size
   - Click **⎘** on any row to copy the full file path to clipboard
@@ -415,6 +428,7 @@ Open `http://localhost:{DashboardPort}/` (default: http://localhost:5051/) in a 
   - Column headers are sortable
 - **Auto-polls every 5 seconds**
 - **JSON API** at `http://localhost:5051/api/status`
+- **Report endpoints:** `http://localhost:5051/report` and `http://localhost:5051/log` serve the HTML report files directly
 
 ---
 
@@ -439,7 +453,7 @@ Set `"Default": "Debug"` under `Logging:LogLevel` for verbose output.
 
 - Adding, removing, or toggling rules (`Enabled`)
 - `PollingIntervalSeconds`
-- Any rule field: `FilePatterns`, `SourceFolders`, `TargetFolder`, `Operation`, `DuplicateHandling`, `IncludeSubDirectories`, `MostRecentAgeDays`, `OlderThanDays`, `PrependSourceFolderName`, `SkipIfSameSize`
+- Any rule field: `FilePatterns`, `SourceFolders`, `TargetFolder`, `Operation`, `DuplicateHandling`, `IncludeSubDirectories`, `MostRecentAgeDays`, `OlderThanDays`, `PrependSourceFolderName`, `SkipIfSameSize`, `NotifyOnAction`
 - `ReportFilePath`, `LogFilePath`, `LogMaxEntries`, `LogRetentionDays`, `ReportRetentionDays`, `HtmlRefreshSeconds`
 
 > **Note:** `DashboardPort` requires a restart to take effect.  
@@ -530,8 +544,7 @@ The `run-hidden.vbs` file is included in the `publish\` folder and launches the 
 
 **Symptom:** `dotnet publish` fails with "The file is locked by: FileOrganizer".
 
-**Fix:** Stop the running instance before publishing:
+**Fix:** `schedule-startup.bat` and `install-service.bat` both handle this automatically — they stop the running instance before publishing. If running `dotnet publish` manually, stop the app first:
 ```powershell
 taskkill /IM FileOrganizer.exe /F
 ```
-Then re-run `schedule-startup.bat` or `dotnet publish` manually.

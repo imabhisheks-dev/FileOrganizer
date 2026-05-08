@@ -12,7 +12,12 @@ set PUBLISH_DIR=%~dp0publish
 set EXE_PATH=%PUBLISH_DIR%\FileOrganizer.exe
 set VBS_PATH=%PUBLISH_DIR%\run-hidden.vbs
 
-echo [1/3] Publishing application...
+echo [0/3] Stopping any running instance...
+schtasks /End /TN "%TASK_NAME%" >nul 2>&1
+taskkill /IM FileOrganizer.exe /F >nul 2>&1
+timeout /t 2 /nobreak >nul
+
+echo [1/4] Publishing application...
 dotnet publish "%~dp0FileOrganizer.csproj" ^
   --configuration Release ^
   --runtime win-x64 ^
@@ -23,14 +28,14 @@ if %ERRORLEVEL% neq 0 (
     exit /b %ERRORLEVEL%
 )
 
-echo [2/3] Writing hidden launcher...
+echo [2/4] Writing hidden launcher...
 (
 echo Dim exe
 echo exe = CreateObject^("Scripting.FileSystemObject"^).GetParentFolderName^(WScript.ScriptFullName^) ^& "\FileOrganizer.exe"
 echo CreateObject^("WScript.Shell"^).Run """" ^& exe ^& """", 0, False
 ) > "%VBS_PATH%"
 
-echo [3/3] Registering scheduled task...
+echo [3/4] Registering scheduled task...
 
 :: Remove existing task if present
 schtasks /Delete /TN "%TASK_NAME%" /F >nul 2>&1
@@ -70,11 +75,14 @@ echo ^</Task^>
 schtasks /Create /TN "%TASK_NAME%" /XML "%XML_FILE%" /F
 del "%XML_FILE%" >nul 2>&1
 
+echo [4/4] Starting application now...
+schtasks /Run /TN "%TASK_NAME%"
+if %ERRORLEVEL% neq 0 (
+    echo WARNING: Could not start the task immediately. It will run on next login.
+)
+
 echo.
-echo Done! FileOrganizer will start automatically when you log in to Windows.
-echo.
-echo To start it right now without rebooting:
-echo   schtasks /Run /TN "%TASK_NAME%"
+echo Done! FileOrganizer is running and will start automatically on login.
 echo.
 echo To stop it:
 echo   taskkill /IM FileOrganizer.exe /F

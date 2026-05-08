@@ -11,6 +11,11 @@ set SERVICE_DISPLAY=File Organizer Service
 set SERVICE_DESC=Monitors configured source folders and moves/copies matched files to target folders.
 set PUBLISH_DIR=%~dp0publish
 
+echo [0/3] Stopping any running instance...
+sc stop "%SERVICE_NAME%" >nul 2>&1
+taskkill /IM FileOrganizer.exe /F >nul 2>&1
+timeout /t 2 /nobreak >nul
+
 echo [1/3] Publishing application...
 dotnet publish "%~dp0FileOrganizer.csproj" ^
   --configuration Release ^

@@ -111,6 +111,40 @@ public sealed class DashboardServer : BackgroundService
                 return;
             }
 
+            // ── GET /api/open-file?path=...  →  open file in default app ────
+            if (req.HttpMethod == "GET" && path == "/api/open-file")
+            {
+                var filePath = req.QueryString["path"] ?? string.Empty;
+                var cfg = _config.CurrentValue;
+                // Only allow opening the configured report/log files (not arbitrary paths)
+                if (filePath == cfg.ReportFilePath || filePath == cfg.LogFilePath)
+                {
+                    try
+                    {
+                        System.Diagnostics.Process.Start(
+                            new System.Diagnostics.ProcessStartInfo(filePath) { UseShellExecute = true });
+                    }
+                    catch { /* best-effort */ }
+                }
+                res.StatusCode = 204;
+                res.Close();
+                return;
+            }
+
+            // ── GET /report  →  serve report HTML file ────────────────────
+            if (req.HttpMethod == "GET" && path == "/report")
+            {
+                await ServeHtmlFileAsync(res, _config.CurrentValue.ReportFilePath);
+                return;
+            }
+
+            // ── GET /log  →  serve log HTML file ────────────────────────────
+            if (req.HttpMethod == "GET" && path == "/log")
+            {
+                await ServeHtmlFileAsync(res, _config.CurrentValue.LogFilePath);
+                return;
+            }
+
             res.StatusCode = 404;
             res.Close();
         }
@@ -119,6 +153,33 @@ public sealed class DashboardServer : BackgroundService
             _logger.LogError(ex, "Dashboard handler error.");
             try { res.StatusCode = 500; res.Close(); } catch { /* best-effort */ }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    private static async Task ServeHtmlFileAsync(HttpListenerResponse res, string filePath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+            {
+                var msg = Encoding.UTF8.GetBytes("<html><body><p>File not found: " +
+                    System.Security.SecurityElement.Escape(filePath) + "</p></body></html>");
+                res.StatusCode = 404;
+                res.ContentType = "text/html; charset=utf-8";
+                res.ContentLength64 = msg.Length;
+                await res.OutputStream.WriteAsync(msg);
+            }
+            else
+            {
+                var bytes = await File.ReadAllBytesAsync(filePath);
+                res.StatusCode = 200;
+                res.ContentType = "text/html; charset=utf-8";
+                res.Headers["Cache-Control"] = "no-store";
+                res.ContentLength64 = bytes.Length;
+                await res.OutputStream.WriteAsync(bytes);
+            }
+        }
+        finally { res.Close(); }
     }
 
     // -----------------------------------------------------------------------
@@ -335,6 +396,15 @@ public sealed class DashboardServer : BackgroundService
                     white-space: nowrap; z-index: 999;
                 }
                 #toast.show { opacity: 1; }
+
+                /* ── Report link buttons ──────────────────────── */
+                .link-btn {
+                    display: block; background: #1e3a5f; border: 1px solid #3b4f7a;
+                    color: #60a5fa; border-radius: 5px; padding: 5px 10px;
+                    font-size: 0.78rem; cursor: pointer; text-align: left;
+                    width: 100%; transition: background .15s;
+                }
+                .link-btn:hover { background: #253f6e; }
             </style>
         </head>
         <body>
@@ -377,6 +447,10 @@ public sealed class DashboardServer : BackgroundService
                         <div class="sc-label">Poll Interval</div>
                         <div class="sc-value" id="sum-poll">—</div>
                         <div class="sc-sub">seconds</div>
+                    </div>
+                    <div class="summary-card">
+                        <div class="sc-label">Reports</div>
+                        <div id="quick-links" style="display:flex;flex-direction:column;gap:6px;margin-top:4px"></div>
                     </div>
                 </div>
 
@@ -426,6 +500,12 @@ public sealed class DashboardServer : BackgroundService
                     document.getElementById('sum-folders').textContent = d.folders.length;
                     document.getElementById('sum-errors').textContent  = d.recentErrorCount;
                     document.getElementById('sum-poll').textContent    = d.pollingIntervalSec;
+
+                    const ql = document.getElementById('quick-links');
+                    const qls = [];
+                    if (d.reportFilePath) qls.push(`<button class="link-btn" onclick="window.open('/report','_blank')">&#128202; Activity Report</button>`);
+                    if (d.logFilePath)    qls.push(`<button class="link-btn" onclick="window.open('/log','_blank')">&#128196; Log Viewer</button>`);
+                    ql.innerHTML = qls.join('');
 
                     const container = document.getElementById('folders-container');
 
@@ -554,6 +634,10 @@ public sealed class DashboardServer : BackgroundService
                     t.classList.add('show');
                     clearTimeout(toastTimer);
                     toastTimer = setTimeout(() => t.classList.remove('show'), 2000);
+                }
+
+                function openFile(btn) {
+                    fetch('/api/open-file?path=' + encodeURIComponent(btn.dataset.path)).catch(() => {});
                 }
 
                 // ── Helpers ────────────────────────────────────────

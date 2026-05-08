@@ -60,6 +60,13 @@ public class FileRule
     /// This check runs before DuplicateHandling, regardless of that setting.
     /// </summary>
     public bool SkipIfSameSize { get; set; } = false;
+
+    /// <summary>
+    /// When true, a Windows toast notification is shown after each successful file
+    /// operation (Copy, Move, or Delete) for this rule. Has no effect when running
+    /// as a Windows Service in Session 0.
+    /// </summary>
+    public bool NotifyOnAction { get; set; } = false;
 }
 
 public enum FileOperation
